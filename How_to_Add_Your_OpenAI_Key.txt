@@ -1,0 +1,5 @@
+How to Add Your OpenAI Key
+1) On Render, open your Web Service → Environment.
+2) Add env var OPENAI_API_KEY = your real OpenAI key (from platform.openai.com).
+3) Add env var ADMIN_KEY = a strong secret (e.g., mysecret123).
+4) Save and Redeploy.
