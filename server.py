@@ -18,6 +18,11 @@ conn.commit()
 if not cur.execute("SELECT id FROM redeem_codes WHERE code='TESTCODE123'").fetchone():
     cur.execute("INSERT INTO redeem_codes (code,status,created_at) VALUES ('TESTCODE123','unused',?)",(int(time.time()),))
     conn.commit()
+cur.execute(
+    "INSERT OR IGNORE INTO licenses (key, status, created_at) VALUES (?, 'active', ?)",
+    ("ENG-4419EF48", int(time.time()))
+)
+conn.commit()
 
 @app.get("/redeem.html", response_class=HTMLResponse)
 async def redeem_page():
