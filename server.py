@@ -168,9 +168,9 @@ async def generate(req: Request):
 
     # 4. Build prompt
     prompt = (
-        "You are EngageBoost. Given this social media post:\n"
-        f"'''{text}'''\n"
-        f"Write 3 short, natural, human-sounding comments in a {tone} tone.\n"
+        "You are EngageBoost. Given this social media post:\\n"
+        f"'''{text}'''\\n"
+        f"Write 3 short, natural, human-sounding comments in a {tone} tone.\\n"
         "Return ONLY a JSON array of 3 strings."
     )
 
