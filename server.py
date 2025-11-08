@@ -44,7 +44,7 @@ if not cur.execute("SELECT id FROM redeem_codes WHERE code='TESTCODE123'").fetch
 # This line ensures your permanent license always exists:
 cur.execute(
     "INSERT OR IGNORE INTO licenses (key, status, created_at) VALUES (?, 'active', ?)",
-    ("ENG-4419EF48", int(time.time()))
+    ("ENG-8EF49C16", int(time.time()))
 )
 conn.commit()
 
