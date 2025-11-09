@@ -4,69 +4,71 @@ import time
 import uuid
 import sqlite3
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import HTMLResponse
 import openai
 
 app = FastAPI(title="EngageBoost Server")
 DB = "engageboost.db"
 
-# ---------- Database helper ----------
+
+# ---------- DB helper ----------
 def db():
     conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 # ---------- Initialize tables ----------
 conn = db()
 cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS licenses (
-    id INTEGER PRIMARY KEY,
-    key TEXT UNIQUE,
-    status TEXT DEFAULT 'active',
-    created_at INTEGER
+cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS licenses (
+        id INTEGER PRIMARY KEY,
+        key TEXT UNIQUE,
+        status TEXT DEFAULT 'active',
+        created_at INTEGER
+    )
+"""
 )
-""")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS redeem_codes (
-    id INTEGER PRIMARY KEY,
-    code TEXT UNIQUE,
-    status TEXT DEFAULT 'unused',
-    license_key TEXT,
-    created_at INTEGER,
-    redeemed_at INTEGER
+cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS redeem_codes (
+        id INTEGER PRIMARY KEY,
+        code TEXT UNIQUE,
+        status TEXT DEFAULT 'unused',
+        license_key TEXT,
+        created_at INTEGER,
+        redeemed_at INTEGER
+    )
+"""
 )
-""")
 
 conn.commit()
 
-# ---------- Seed default redeem code ----------
-if not cur.execute("SELECT id FROM redeem_codes WHERE code='TESTCODE123'").fetchone():
+# ---------- Seed one test redeem code (for you) ----------
+if not cur.execute(
+    "SELECT id FROM redeem_codes WHERE code='TESTCODE123'"
+).fetchone():
     cur.execute(
-        "INSERT INTO redeem_codes (code, status, created_at) VALUES ('TESTCODE123','unused',?)",
-        (int(time.time()),)
+        "INSERT INTO redeem_codes (code, status, created_at) VALUES (?, 'unused', ?)",
+        ("TESTCODE123", int(time.time())),
     )
     conn.commit()
 
-# ---------- Seed default licenses ----------
-# These are always treated as valid & active if used by the extension.
-for key in ("ENG-4419EF48", "ENG-8EF49C16"):
-    cur.execute(
-        "INSERT OR IGNORE INTO licenses (key, status, created_at) VALUES (?, 'active', ?)",
-        (key, int(time.time()))
-    )
-
 conn.commit()
 
-# ---------- Health / root ----------
+
+# ---------- Health check ----------
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "EngageBoost server running"}
 
-# ---------- Redeem Page ----------
+
+# ---------- Redeem Page (for buyers) ----------
 @app.get("/redeem.html", response_class=HTMLResponse)
 async def redeem_page():
     return HTMLResponse(
@@ -77,28 +79,40 @@ async def redeem_page():
     <title>EngageBoost — Redeem</title>
   </head>
   <body style="font-family: system-ui; margin: 40px">
-    <h2>Enter your AppSumo Code</h2>
-    <input id="code" placeholder="e.g. TESTCODE123" style="padding:8px;width:300px">
-    <button onclick="go()" style="padding:8px 12px">Redeem</button>
-    <div id="out" style="margin-top:12px"></div>
+    <h2>Enter your code to get your EngageBoost license</h2>
+    <p>Paste the code you received from your purchase (e.g. AppSumo), then click Redeem.</p>
+    <input id="code" placeholder="e.g. ASUMO-XXXX" style="padding:8px;width:320px">
+    <button onclick="go()" style="padding:8px 14px;margin-left:4px;">Redeem</button>
+    <div id="out" style="margin-top:14px;font-weight:500;"></div>
     <script>
       async function go() {
         const code = document.getElementById('code').value.trim();
+        if (!code) {
+          document.getElementById('out').innerText = 'Please enter a code.';
+          return;
+        }
         const res = await fetch('/redeem', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ code })
         });
         const data = await res.json();
-        document.getElementById('out').innerText =
-          res.ok ? ('License: ' + data.license) : (data.detail || 'Error');
+        if (res.ok) {
+          document.getElementById('out').innerText =
+            'Your license key: ' + data.license +
+            '\\nCopy this key and paste it into your EngageBoost Chrome extension settings.';
+        } else {
+          document.getElementById('out').innerText = data.detail || 'Error redeeming code.';
+        }
       }
     </script>
   </body>
-</html>"""
+</html>
+"""
     )
 
-# ---------- Redeem API ----------
+
+# ---------- Redeem API: code -> license ----------
 @app.post("/redeem")
 async def redeem(payload: dict):
     code = (payload.get("code") or "").strip()
@@ -108,8 +122,7 @@ async def redeem(payload: dict):
     conn = db()
     c = conn.cursor()
     row = c.execute(
-        "SELECT * FROM redeem_codes WHERE code=?",
-        (code,)
+        "SELECT * FROM redeem_codes WHERE code = ?", (code,)
     ).fetchone()
 
     if not row:
@@ -117,23 +130,79 @@ async def redeem(payload: dict):
     if row["status"] == "used":
         raise HTTPException(400, "Code already redeemed")
 
-    # Generate a new license key for this code
-    key = "ENG-" + uuid.uuid4().hex[:8].upper()
+    # Create unique license key
+    license_key = "ENG-" + uuid.uuid4().hex[:8].upper()
     now = int(time.time())
 
     c.execute(
         "INSERT INTO licenses (key, status, created_at) VALUES (?, 'active', ?)",
-        (key, now)
+        (license_key, now),
     )
     c.execute(
         "UPDATE redeem_codes SET status='used', license_key=?, redeemed_at=? WHERE id=?",
-        (key, now, row["id"])
+        (license_key, now, row["id"]),
     )
     conn.commit()
 
-    return {"license": key}
+    return {"license": license_key}
 
-# ---------- Generate API ----------
+
+# ---------- Admin: generate redeem codes in bulk ----------
+ADMIN_KEY = os.getenv("ADMIN_KEY", "").strip()
+
+
+@app.post("/admin/generate_redeem_codes")
+async def admin_generate_redeem_codes(
+    payload: dict, x_admin_key: str = Header(None)
+):
+    """
+    Admin-only.
+    Headers:
+      x-admin-key: your ADMIN_KEY from environment
+    Body JSON:
+      {
+        "prefix": "ASUMO",
+        "count": 50
+      }
+    Returns:
+      { "codes": ["ASUMO-XXXX...", ...] }
+    """
+    if not ADMIN_KEY:
+        raise HTTPException(500, "ADMIN_KEY is not set on server")
+
+    if x_admin_key != ADMIN_KEY:
+        raise HTTPException(401, "Unauthorized")
+
+    prefix = (payload.get("prefix") or "ASUMO").strip().upper()
+    count = int(payload.get("count") or 1)
+
+    if count < 1 or count > 1000:
+        raise HTTPException(
+            400, "count must be between 1 and 1000"
+        )
+
+    conn = db()
+    c = conn.cursor()
+    codes = []
+    now = int(time.time())
+
+    for _ in range(count):
+        code = f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            c.execute(
+                "INSERT INTO redeem_codes (code, status, created_at) VALUES (?, 'unused', ?)",
+                (code, now),
+            )
+            codes.append(code)
+        except Exception:
+            # ignore duplicates if any collision
+            pass
+
+    conn.commit()
+    return {"codes": codes}
+
+
+# ---------- Generate comments (used by Chrome extension) ----------
 @app.post("/generate")
 async def generate(req: Request):
     # 1. Check license
@@ -143,38 +212,38 @@ async def generate(req: Request):
 
     conn = db()
     c = conn.cursor()
-    license_row = c.execute(
+    lic = c.execute(
         "SELECT id FROM licenses WHERE key=? AND status='active'",
-        (client_key,)
+        (client_key,),
     ).fetchone()
 
-    if not license_row:
+    if not lic:
         raise HTTPException(401, "Invalid or inactive license")
 
-    # 2. Read request body
+    # 2. Read body
     body = await req.json()
     text = (body.get("text") or "").strip()
-    tone = (body.get("tone") or "Professional").strip()
+    tone = (body.get("tone") or "Friendly").strip()
 
     if not text:
         raise HTTPException(400, "Missing text")
 
-    # 3. Check OpenAI key
-    api_key = os.getenv("OPENAI_API_KEY")
+    # 3. OpenAI API key
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(500, "Server missing OPENAI_API_KEY")
 
     openai.api_key = api_key
 
-    # 4. Build prompt
+    # 4. Prompt
     prompt = (
-        "You are EngageBoost. Given this social media post:\\n"
-        f"'''{text}'''\\n"
-        f"Write 3 short, natural, human-sounding comments in a {tone} tone.\\n"
-        "Return ONLY a JSON array of 3 strings."
+        "You are EngageBoost, an assistant that writes natural, human-sounding social media comments.\n"
+        f"Post:\n'''{text}'''\n"
+        f"Tone: {tone}.\n"
+        "Return ONLY a JSON array of 3 short, unique, human comments (strings). No explanations."
     )
 
-    # 5. Call OpenAI (using openai==0.28.0 style)
+    # 5. Call OpenAI (using openai==0.28 style)
     try:
         resp = openai.ChatCompletion.create(
             model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
@@ -184,14 +253,18 @@ async def generate(req: Request):
         )
         content = resp.choices[0].message.content.strip()
 
-        # Try to parse JSON array
+        # Try parse JSON array directly
         try:
             data = json.loads(content)
             if isinstance(data, list):
                 return {"comments": data}
         except Exception:
-            # Fallback: split into lines
-            lines = [line.strip(" -•") for line in content.splitlines() if line.strip()]
+            # Fallback: split into lines if model didn't follow JSON perfectly
+            lines = [
+                line.strip(" -*•")
+                for line in content.splitlines()
+                if line.strip()
+            ]
             return {"comments": lines[:3]}
 
     except Exception as e:
